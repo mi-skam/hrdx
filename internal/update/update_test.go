@@ -1,6 +1,7 @@
 package update
 
 import (
+	"archive/zip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,5 +90,120 @@ func TestLookupChecksum(t *testing.T) {
 	}
 	if _, err := lookupChecksum(path, "missing.tar.gz"); err == nil {
 		t.Fatal("missing asset should error")
+	}
+}
+
+func TestReleaseAssetNameFor(t *testing.T) {
+	tests := []struct {
+		goos, goarch string
+		want         string
+	}{
+		{"linux", "amd64", "hrdx_1.2.3_linux_amd64.tar.gz"},
+		{"darwin", "arm64", "hrdx_1.2.3_darwin_arm64.tar.gz"},
+		{"windows", "amd64", "hrdx_1.2.3_windows_amd64.zip"},
+		{"windows", "arm64", "hrdx_1.2.3_windows_arm64.zip"},
+	}
+	for _, tt := range tests {
+		got, err := releaseAssetNameFor("1.2.3", tt.goos, tt.goarch)
+		if err != nil || got != tt.want {
+			t.Errorf("releaseAssetNameFor(%q, %q) = %q, %v; want %q", tt.goos, tt.goarch, got, err, tt.want)
+		}
+	}
+	if _, err := releaseAssetNameFor("1.2.3", "freebsd", "amd64"); err == nil {
+		t.Error("unsupported OS should fail")
+	}
+	if _, err := releaseAssetNameFor("1.2.3", "windows", "386"); err == nil {
+		t.Error("unsupported architecture should fail")
+	}
+}
+
+func TestExtractZipFindsWindowsExecutable(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "release.zip")
+	writeZip(t, archive, map[string]string{
+		"README.md": "release notes",
+		"hrdx.exe":  "new executable",
+	})
+	dst := filepath.Join(dir, "out")
+	if err := os.Mkdir(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractArchive(archive, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "hrdx.exe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new executable" {
+		t.Fatalf("extracted content = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "README.md")); !os.IsNotExist(err) {
+		t.Fatal("extractor should only write hrdx.exe")
+	}
+}
+
+func TestExtractZipRequiresWindowsExecutable(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "release.zip")
+	writeZip(t, archive, map[string]string{"hrdx": "wrong platform binary"})
+	if err := extractZip(archive, dir); err == nil {
+		t.Fatal("ZIP without hrdx.exe should fail")
+	}
+}
+
+func TestReplaceBinaryWindowsStagesAndKeepsBackup(t *testing.T) {
+	dir := t.TempDir()
+	cur := filepath.Join(dir, "hrdx.exe")
+	newBin := filepath.Join(t.TempDir(), "hrdx.exe") // exercise cross-volume-safe staging path
+	if err := os.WriteFile(cur, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cur+".old", []byte("stale backup"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newBin, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceBinaryWindows(cur, newBin); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, cur, "new")
+	assertFileContent(t, cur+".old", "old")
+	assertFileContent(t, newBin, "new")
+}
+
+func writeZip(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	for name, content := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("%s content = %q, want %q", path, got, want)
 	}
 }

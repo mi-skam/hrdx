@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -173,12 +174,7 @@ func playSound(kind string) {
 	file := soundFile(kind)
 	go func() {
 		if file != "" {
-			players := [][]string{
-				{"afplay", file},
-				{"paplay", file},
-				{"aplay", "-q", file},
-			}
-			for _, player := range players {
+			for _, player := range soundPlayers(file) {
 				path, err := exec.LookPath(player[0])
 				if err != nil {
 					continue
@@ -198,4 +194,22 @@ func playSound(kind string) {
 		}
 		_, _ = os.Stdout.WriteString("\a")
 	}()
+}
+
+// soundPlayers lists the OS audio players to try, in order, for file.
+// Windows has none of afplay/paplay/aplay; PowerShell's SoundPlayer class
+// plays WAV files (the only format hrdx ever writes) without needing any
+// extra binary, since PowerShell and .NET ship with every install.
+func soundPlayers(file string) [][]string {
+	if runtime.GOOS == "windows" {
+		script := "(New-Object Media.SoundPlayer '" + strings.ReplaceAll(file, "'", "''") + "').PlaySync()"
+		return [][]string{
+			{"powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script},
+		}
+	}
+	return [][]string{
+		{"afplay", file},
+		{"paplay", file},
+		{"aplay", "-q", file},
+	}
 }

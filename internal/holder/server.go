@@ -6,15 +6,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/creack/pty"
-	"golang.org/x/sys/unix"
+	"github.com/aymanbagabas/go-pty"
 )
+
+// resolveCommand finds command on $PATH before handing it to go-pty. On
+// Windows, go-pty's Cmd.Start resolves a bare command name against the
+// child's working directory instead of $PATH when Dir is set, so agent
+// binaries elsewhere on PATH would otherwise fail to start.
+func resolveCommand(command string) string {
+	if resolved, err := exec.LookPath(command); err == nil {
+		return resolved
+	}
+	return command
+}
 
 // ringCapacity bounds detached output per session. 1 MiB comfortably
 // holds a full screen plus the scrollback a vt10x replay can use.
@@ -22,12 +30,13 @@ const ringCapacity = 1 << 20
 
 // session is one PTY-owning subprocess inside the holder.
 type session struct {
-	id      int64
-	command string
-	cwd     string
-	ptmx    *os.File
-	cmd     *exec.Cmd
-	running atomic.Bool // written by pump on exit, read by handlers
+	id          int64
+	command     string
+	cwd         string
+	pt          pty.Pty
+	ptCloseOnce sync.Once
+	cmd         *pty.Cmd
+	running     atomic.Bool // written by pump on exit, read by handlers
 
 	mu     sync.Mutex
 	buffer *ring // detached output, replayed on attach
@@ -131,7 +140,7 @@ func (s *Server) serveClient(conn net.Conn) {
 			target := s.sessions[f.ID]
 			s.mu.Unlock()
 			if target != nil && target.running.Load() {
-				_, _ = target.ptmx.Write(f.Payload)
+				_, _ = target.pt.Write(f.Payload)
 			}
 		case TCtrl:
 			var req request
@@ -169,7 +178,7 @@ func (s *Server) handle(req request) response {
 			return response{Req: req.Req, Err: fmt.Sprintf("session %d not found", req.Session)}
 		}
 		if req.Cols > 1 && req.Rows > 1 && target.running.Load() {
-			_ = pty.Setsize(target.ptmx, &pty.Winsize{Cols: uint16(req.Cols), Rows: uint16(req.Rows)})
+			_ = target.pt.Resize(req.Cols, req.Rows)
 		}
 		// Subscribe before replaying buffered output. Holding the session lock
 		// keeps live PTY output from overtaking the replay.
@@ -191,7 +200,7 @@ func (s *Server) handle(req request) response {
 			return response{Req: req.Req, Err: fmt.Sprintf("session %d not found", req.Session)}
 		}
 		if target.running.Load() && req.Cols > 1 && req.Rows > 1 {
-			_ = pty.Setsize(target.ptmx, &pty.Winsize{Cols: uint16(req.Cols), Rows: uint16(req.Rows)})
+			_ = target.pt.Resize(req.Cols, req.Rows)
 		}
 		return response{Req: req.Req}
 
@@ -233,11 +242,20 @@ func (s *Server) start(req request) (int64, error) {
 	if rows < 2 {
 		rows = 24
 	}
-	cmd := exec.Command(req.Command, req.Args...)
+	ptmx, err := pty.New()
+	if err != nil {
+		return 0, fmt.Errorf("open pty: %w", err)
+	}
+	if err := ptmx.Resize(cols, rows); err != nil {
+		ptmx.Close()
+		return 0, fmt.Errorf("resize pty: %w", err)
+	}
+
+	cmd := ptmx.Command(resolveCommand(req.Command), req.Args...)
 	cmd.Dir = req.CWD
 	cmd.Env = req.Env
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
-	if err != nil {
+	if err := cmd.Start(); err != nil {
+		ptmx.Close()
 		return 0, fmt.Errorf("start %s: %w", req.Command, err)
 	}
 
@@ -248,7 +266,7 @@ func (s *Server) start(req request) (int64, error) {
 		id:      id,
 		command: req.Command,
 		cwd:     req.CWD,
-		ptmx:    ptmx,
+		pt:      ptmx,
 		cmd:     cmd,
 		buffer:  newRing(ringCapacity),
 	}
@@ -262,10 +280,25 @@ func (s *Server) start(req request) (int64, error) {
 
 // pump reads one session's PTY forever, forwarding output to the
 // attached client or buffering it while detached.
+//
+// On Unix the blocking Read below returns EOF on its own once the child
+// exits and the kernel drains the pty's buffer. ConPTY on Windows has no
+// such guarantee, so a side goroutine waits for the process and closes
+// the pty to unblock Read there too; the brief delay first gives any
+// last ConPTY output a chance to arrive. On Unix this races harmlessly
+// behind the natural EOF, which always wins first in practice.
 func (s *Server) pump(target *session) {
+	waited := make(chan struct{})
+	go func() {
+		_ = target.cmd.Wait()
+		close(waited)
+		time.Sleep(150 * time.Millisecond)
+		target.closePt()
+	}()
+
 	buffer := make([]byte, 32*1024)
 	for {
-		n, err := target.ptmx.Read(buffer)
+		n, err := target.pt.Read(buffer)
 		if n > 0 {
 			payload := make([]byte, n)
 			copy(payload, buffer[:n])
@@ -279,7 +312,7 @@ func (s *Server) pump(target *session) {
 			break
 		}
 	}
-	_ = target.cmd.Wait()
+	<-waited
 	target.running.Store(false)
 	s.sendToClient(frame{Type: TEvt, Payload: marshal(event{Event: "exited", Session: target.id})})
 }
@@ -328,11 +361,22 @@ func (s *Server) session(id int64) *session {
 	return s.sessions[id]
 }
 
+// closePt closes the session's PTY exactly once. The exit-detection
+// goroutine in pump and an explicit kill can both race to close it
+// (Windows' ConPTY especially: closing an already-closed handle while a
+// read is in flight can crash rather than error out cleanly), so every
+// close goes through this guard.
+func (t *session) closePt() {
+	t.ptCloseOnce.Do(func() {
+		_ = t.pt.Close()
+	})
+}
+
 func (s *Server) kill(target *session) {
 	if target.running.Load() && target.cmd.Process != nil {
 		_ = target.cmd.Process.Kill()
 	}
-	_ = target.ptmx.Close()
+	target.closePt()
 	s.mu.Lock()
 	delete(s.sessions, target.id)
 	s.mu.Unlock()
@@ -363,22 +407,11 @@ func (t *session) foreground() string {
 		return t.fgName
 	}
 	t.fgCheckedAt = time.Now()
-	name := ""
-	if pgid, err := unix.IoctlGetInt(int(t.ptmx.Fd()), unix.TIOCGPGRP); err == nil && pgid > 0 {
-		name = processName(pgid)
+	rootPID := 0
+	if t.cmd.Process != nil {
+		rootPID = t.cmd.Process.Pid
 	}
+	name := foregroundName(t.pt, rootPID)
 	t.fgName = name
 	return name
-}
-
-// processName resolves a pid to its command name (Linux /proc, else ps).
-func processName(pid int) string {
-	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
-		return strings.TrimSpace(string(data))
-	}
-	output, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimPrefix(filepath.Base(strings.TrimSpace(string(output))), "-")
 }

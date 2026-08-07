@@ -1,6 +1,7 @@
 package update
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -107,7 +108,7 @@ func Run(version string) error {
 		return fmt.Errorf("extract archive: %w", err)
 	}
 
-	newBin := filepath.Join(extractDir, "hrdx")
+	newBin := filepath.Join(extractDir, executableName(runtime.GOOS))
 	if st, err := os.Stat(newBin); err != nil || st.IsDir() {
 		return fmt.Errorf("extracted archive does not contain an hrdx binary at %s", newBin)
 	}
@@ -158,21 +159,31 @@ func RunCheck(version string) error {
 //
 //	{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 func releaseAssetName(version string) (string, error) {
-	goos := runtime.GOOS
-	goarch := runtime.GOARCH
+	return releaseAssetNameFor(version, runtime.GOOS, runtime.GOARCH)
+}
+
+func releaseAssetNameFor(version, goos, goarch string) (string, error) {
+	ext := ".tar.gz"
 	switch goos {
 	case "linux", "darwin":
-		// supported
+	case "windows":
+		ext = ".zip"
 	default:
 		return "", fmt.Errorf("unsupported OS for hrdx update: %s (download manually from the release page)", goos)
 	}
 	switch goarch {
 	case "amd64", "arm64":
-		// supported
 	default:
 		return "", fmt.Errorf("unsupported CPU arch for hrdx update: %s", goarch)
 	}
-	return fmt.Sprintf("hrdx_%s_%s_%s.tar.gz", version, goos, goarch), nil
+	return fmt.Sprintf("hrdx_%s_%s_%s%s", version, goos, goarch, ext), nil
+}
+
+func executableName(goos string) string {
+	if goos == "windows" {
+		return "hrdx.exe"
+	}
+	return "hrdx"
 }
 
 // downloadFile fetches url to dst, streaming through io.Copy so big
@@ -231,9 +242,12 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// extractArchive shells out to the system tar rather than pulling in a
-// Go archive lib; every supported platform ships one.
+// extractArchive uses the standard library for Windows ZIP assets. Unix
+// releases retain the existing system-tar extraction path.
 func extractArchive(archive, dst string) error {
+	if strings.EqualFold(filepath.Ext(archive), ".zip") {
+		return extractZip(archive, dst)
+	}
 	cmd := exec.Command("tar", "-xzf", archive, "-C", dst)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -242,11 +256,61 @@ func extractArchive(archive, dst string) error {
 	return nil
 }
 
-// replaceBinary writes the new binary in place of the old one,
-// preserving the old binary's permissions. Renames in-place, which
-// works while the binary is running because the kernel keeps the
-// in-memory inode alive until the process exits.
+func extractZip(archive, dst string) error {
+	r, err := zip.OpenReader(archive)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	// GoReleaser places the executable at the archive root. Extract only that
+	// file: README and any future release metadata are not needed by updater.
+	want := executableName("windows")
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() || filepath.Base(filepath.FromSlash(f.Name)) != want {
+			continue
+		}
+		in, err := f.Open()
+		if err != nil {
+			return err
+		}
+		outPath := filepath.Join(dst, want)
+		out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
+		if err != nil {
+			_ = in.Close()
+			return err
+		}
+		_, copyErr := io.Copy(out, in)
+		closeErr := out.Close()
+		inErr := in.Close()
+		if copyErr != nil {
+			_ = os.Remove(outPath)
+			return copyErr
+		}
+		if closeErr != nil {
+			_ = os.Remove(outPath)
+			return closeErr
+		}
+		if inErr != nil {
+			return inErr
+		}
+		return nil
+	}
+	return fmt.Errorf("zip archive does not contain %s", want)
+}
+
+// replaceBinary writes the new binary in place of the old one while
+// preserving Unix behavior. Windows cannot overwrite a running executable,
+// so it uses a same-directory staged file and keeps the running image as
+// <executable>.old. That backup is removed by the next successful update.
 func replaceBinary(cur, newBin string) error {
+	if runtime.GOOS == "windows" {
+		return replaceBinaryWindows(cur, newBin)
+	}
+	return replaceBinaryUnix(cur, newBin)
+}
+
+func replaceBinaryUnix(cur, newBin string) error {
 	info, err := os.Stat(cur)
 	if err != nil {
 		return fmt.Errorf("stat current binary: %w", err)
@@ -267,6 +331,63 @@ func replaceBinary(cur, newBin string) error {
 		return fmt.Errorf("copy new binary into place: %w", err)
 	}
 	_ = os.Chmod(cur, mode)
+	return nil
+}
+
+func replaceBinaryWindows(cur, newBin string) error {
+	info, err := os.Stat(cur)
+	if err != nil {
+		return fmt.Errorf("stat current binary: %w", err)
+	}
+	mode := info.Mode().Perm()
+	if mode == 0 {
+		mode = 0o755
+	}
+
+	// Stage on the destination volume before touching the current executable.
+	// This makes both subsequent renames same-volume operations.
+	stage, err := os.CreateTemp(filepath.Dir(cur), "."+filepath.Base(cur)+".new-*")
+	if err != nil {
+		return fmt.Errorf("create staged executable: %w", err)
+	}
+	stagePath := stage.Name()
+	defer os.Remove(stagePath)
+	in, err := os.Open(newBin)
+	if err != nil {
+		_ = stage.Close()
+		return fmt.Errorf("open new binary: %w", err)
+	}
+	_, copyErr := io.Copy(stage, in)
+	inErr := in.Close()
+	syncErr := stage.Sync()
+	closeErr := stage.Close()
+	if copyErr != nil {
+		return fmt.Errorf("stage new binary: %w", copyErr)
+	}
+	if inErr != nil {
+		return fmt.Errorf("close new binary: %w", inErr)
+	}
+	if syncErr != nil {
+		return fmt.Errorf("sync staged executable: %w", syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close staged executable: %w", closeErr)
+	}
+	_ = os.Chmod(stagePath, mode)
+
+	backup := cur + ".old"
+	if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove previous backup %s (close any older hrdx process and retry): %w", backup, err)
+	}
+	if err := os.Rename(cur, backup); err != nil {
+		return fmt.Errorf("move running executable to %s: %w", backup, err)
+	}
+	if err := os.Rename(stagePath, cur); err != nil {
+		if rollbackErr := os.Rename(backup, cur); rollbackErr != nil {
+			return fmt.Errorf("install staged executable: %v; rollback also failed: %v", err, rollbackErr)
+		}
+		return fmt.Errorf("install staged executable (original restored): %w", err)
+	}
 	return nil
 }
 

@@ -30,7 +30,11 @@ hrdx is a experimental, minimal and lightweight terminal multiplexer built for t
 curl -fsSL https://www.hrdx.dev/install.sh | bash
 ```
 
-macOS or Linux, plus at least one agent CLI on your PATH: `codex`, `claude`, `pi` or `zot`. Update any time with `hrdx update`.
+```powershell
+irm https://www.hrdx.dev/install.ps1 | iex
+```
+
+macOS, Linux, or Windows (10 1809+ / 11, via [ConPTY](https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session)), plus at least one agent CLI on your PATH: `codex`, `claude`, `pi` or `zot`. Update on any supported platform with `hrdx update`.
 
 ## Run
 
@@ -59,11 +63,13 @@ hrdx --agent claude
 | `--claude-bin PATH` | Use a specific claude binary |
 | `--pi-bin PATH` | Use a specific pi binary |
 | `--zot-bin PATH` | Use a specific zot binary |
-| `--shell PATH` | Shell for shell panes (default `$SHELL`) |
+| `--shell PATH` | Shell for shell panes (default `$SHELL`; on Windows only when resolvable, otherwise `%COMSPEC%`/`powershell.exe`) |
 | `--state PATH` | State file for workspace persistence (empty disables) |
 | `--fresh` | Ignore saved workspaces and start clean |
 | `--api` | Serve the control API on a unix socket (default on, `--api=false` disables) |
 | `--persist` | Keep pane processes alive across restarts via the session holder (default on) |
+
+A native Windows `hrdx.exe` launched from Git Bash ignores an MSYS-only `SHELL` value such as `/usr/bin/bash`, which Windows cannot resolve, and falls back to `%COMSPEC%`. To use Git Bash for panes, pass a native path explicitly, for example `hrdx --shell "C:/Program Files/Git/bin/bash.exe"`.
 
 ## Keys
 
@@ -71,18 +77,19 @@ All keys go to the focused terminal, except the `ctrl+b` prefix (tmux style):
 
 | After `ctrl+b` | Action |
 |---|---|
-| `c` / `C` | Split right / below (opens a picker: installed agents or shell) |
-| `a` | Cycle the default agent through the installed ones |
-| `s` / `S` | Split with a new shell pane directly (right / below), also `%`/`\"` and `\|`/`-` |
+| `c` or `C` | Split right / below (opens a picker: installed agents or shell) |
+| `a` or `A` | Split right / below with the default agent directly |
+| `s` or `S` | Split with a new shell pane directly (right / below), also `%`/`\"` and `\|`/`-` |
 | `w` | New workspace (directory prompt with tab completion, then agent/shell picker) |
 | `t` | New tab in the current workspace (opens the agent/shell picker) |
-| `n` / `p` | Next / previous tab |
-| `]` / `[` | Next / previous workspace |
-| `tab` / `shift+tab` | Next / previous pane; stays in prefix mode for repeated jumps, `esc` exits |
+| `n` or `p` | Next / previous tab |
+| `]` or `[` | Next / previous workspace |
+| `tab` or `shift+tab` | Next / previous pane; stays in prefix mode for repeated jumps, `esc` exits |
+| `/` | Fuzzy finder over every workspace, tab, and pane: type to filter, arrows select, enter jumps |
 | `r` | Rename the focused pane |
 | `m` | Open the pane context menu |
 | `=` | Equalize all splits |
-| `u` / `d` (or `pgup`/`pgdown`) | Scroll the focused pane's history |
+| `u` or `d` (or `pgup`/`pgdown`) | Scroll the focused pane's history |
 | `esc` / `G` | Back to live output, clear selection |
 | `,` | Settings window: enable / disable agents, notifications |
 | `x` | Close pane (sibling takes its room) |
@@ -90,6 +97,22 @@ All keys go to the focused terminal, except the `ctrl+b` prefix (tmux style):
 | `ctrl+b` | Send a literal ctrl+b to the pane |
 | `q` | Quit |
 | `left` / `right` | Scroll the hint row in the footer (narrow terminals) |
+
+Panes whose process exits (for example `exit` in a shell) close automatically; the sibling pane takes the room. Panes that fail to start stay visible with the error.
+
+### Custom keys
+
+Prefix keys are remappable via a `keys.json` next to the state file (`~/Library/Application Support/hrdx/keys.json` on macOS, `$XDG_CONFIG_HOME/hrdx/keys.json` on Linux, `%AppData%\hrdx\keys.json` on Windows). It maps action names to a single key; an override replaces that action's default keys. The `prefix` action remaps the `ctrl+b` trigger itself, not just an action inside it:
+
+```json
+{
+  "find": "f",
+  "quit": "Q",
+  "agent-cycle": "g"
+}
+```
+
+Actions: `prefix`, `literal`, `quit`, `picker-right`, `picker-down`, `agent-right`, `agent-down`, `agent-cycle` (unbound by default), `shell-right`, `shell-down`, `workspace`, `tab-new`, `tab-next`, `tab-prev`, `space-next`, `space-prev`, `pane-next`, `pane-prev`, `find`, `close-pane`, `close-space`, `equalize`, `rename`, `menu`, `settings`, `scroll-up`, `scroll-down`, `live`.
 
 ## Mouse
 
@@ -143,7 +166,7 @@ The session holder keeps the local SSH, Docker, or Kubernetes client process ali
 
 ## Custom harnesses
 
-Any agent CLI beyond the built-ins can be registered by dropping a `harness.json` next to the state file (`~/Library/Application Support/hrdx/` on macOS, `$XDG_CONFIG_HOME/hrdx/` on Linux). Registered harnesses appear everywhere the built-ins do: in the pickers, in agent cycling, in the sidebar agents list, and in the settings window for enabling and disabling.
+Any agent CLI beyond the built-ins can be registered by dropping a `harness.json` next to the state file (`~/Library/Application Support/hrdx/` on macOS, `$XDG_CONFIG_HOME/hrdx/` on Linux, `%AppData%\hrdx\` on Windows). Registered harnesses appear everywhere the built-ins do: in the pickers, in agent cycling, in the sidebar agents list, and in the settings window for enabling and disabling.
 
 ```json
 [
@@ -176,6 +199,10 @@ The protocol is newline-delimited JSON: send one request per line, receive one r
 ```sh
 SOCK="$HOME/Library/Application Support/hrdx/hrdx.sock"   # macOS
 # SOCK="$XDG_CONFIG_HOME/hrdx/hrdx.sock"                  # Linux
+# hrdx.sock is a native Windows AF_UNIX socket too (%AppData%\hrdx\hrdx.sock).
+# WSL has a separate socket namespace and cannot connect to it directly; Git
+# Bash does not ship a compatible `nc -U`. Use a native Windows client, such
+# as .NET UnixDomainSocketEndPoint or Go's net.DialUnix.
 
 echo '{"id": "1", "method": "status"}' | nc -U "$SOCK"
 echo '{"id": "2", "method": "workspace.create", "params": {"path": "~/Developer/api", "agent": "claude"}}' | nc -U "$SOCK"
@@ -206,7 +233,7 @@ Every request is answered by the TUI's own update loop, so the API always sees e
 
 ## Themes
 
-hrdx themes are JSON files that override any subset of the built-in colors; missing values inherit the default look. Drop them into a `themes/` directory next to the state file (`~/Library/Application Support/hrdx/themes/` on macOS, `$XDG_CONFIG_HOME/hrdx/themes/` on Linux) and pick them in the settings window's theme section. The change applies immediately and persists.
+hrdx themes are JSON files that override any subset of the built-in colors; missing values inherit the default look. Drop them into a `themes/` directory next to the state file (`~/Library/Application Support/hrdx/themes/` on macOS, `$XDG_CONFIG_HOME/hrdx/themes/` on Linux, `%AppData%\hrdx\themes\` on Windows) and pick them in the settings window's theme section. The change applies immediately and persists.
 
 ```json
 {
@@ -237,7 +264,7 @@ See `examples/themes/` for a full example.
 
 ## Notifications
 
-The notification section of the settings window has two independent toggles for finished agent turns: play a sound (built-in `ding` and `chime`, or your own audio files) and a system notification, which rings the terminal bell so your platform's native attention indicator fires: dock badge and bounce on macOS, the window manager's urgency hint on Linux. No notification daemon or permission required. Add custom sounds with a `sounds.json` next to the state file; they appear as choices and are previewed when selected:
+The notification section of the settings window has two independent toggles for finished agent turns: play a sound (built-in `ding` and `chime`, or your own audio files) and a system notification, which rings the terminal bell so your platform's native attention indicator fires: dock badge and bounce on macOS, the window manager's urgency hint on Linux, the taskbar/window attention flash on Windows Terminal (depends on its `bellStyle` setting). No notification daemon or permission required. Add custom sounds with a `sounds.json` next to the state file; they appear as choices and are previewed when selected:
 
 ```json
 [
@@ -246,13 +273,13 @@ The notification section of the settings window has two independent toggles for 
 ]
 ```
 
-`name` is the label in settings (must not collide with built-ins), `file` any audio file your OS player understands (`afplay` on macOS, `paplay`/`aplay` on Linux). Missing files are reported in the footer and skipped.
+`name` is the label in settings (must not collide with built-ins), `file` any audio file your OS player understands (`afplay` on macOS, `paplay`/`aplay` on Linux, PowerShell's `SoundPlayer` on Windows — WAV only there). Missing files are reported in the footer and skipped.
 
 ## Persistence
 
 Quitting hrdx does not kill your sessions. Pane processes live in a small background process (the session holder) that hrdx starts on demand and talks to over a local socket. Close the TUI, reopen it, and every shell and agent reattaches exactly where it was: running commands keep running, scrollback and screen state are replayed, nothing restarts. The holder is the same `hrdx` binary, uses no resources worth mentioning, and goes away when you kill its sessions.
 
-Workspaces, panes, split layout, ratios, selection, and holder session ids are saved automatically (default: `~/Library/Application Support/hrdx/state.json` on macOS, `$XDG_CONFIG_HOME/hrdx/state.json` on Linux). On the next launch the layout is restored and each pane reattaches to its held session. When a held session is gone (rebooted machine, killed holder), the pane starts fresh instead: shell panes get a new shell, and agent panes relaunch resuming their latest session for that directory via the agent's own session store.
+Workspaces, panes, split layout, ratios, selection, and holder session ids are saved automatically (default: `~/Library/Application Support/hrdx/state.json` on macOS, `$XDG_CONFIG_HOME/hrdx/state.json` on Linux, `%AppData%\hrdx\state.json` on Windows). On the next launch the layout is restored and each pane reattaches to its held session. When a held session is gone (rebooted machine, killed holder), the pane starts fresh instead: shell panes get a new shell, and agent panes relaunch resuming their latest session for that directory via the agent's own session store.
 
 `--persist=false` disables the holder (panes die with the TUI, like a plain terminal). `--fresh` skips restoring and cleans up now-unreferenced held sessions; `--state ""` disables persistence entirely.
 
@@ -261,6 +288,8 @@ Workspaces, panes, split layout, ratios, selection, and holder session ids are s
 ```sh
 make check
 ```
+
+Windows without `make` on `PATH`: `go vet ./... && gofmt -l . && go test ./...`.
 
 ## License
 

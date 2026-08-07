@@ -2,14 +2,27 @@ package term
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
+// shellCommand returns a shell and args that run script as one inline
+// command. The scripts passed to startShellPane are written to be valid
+// under both /bin/sh and PowerShell (quoted multi-word echo args, and
+// the "sleep" alias PowerShell ships for Start-Sleep).
+func shellCommand(script string) (string, []string) {
+	if runtime.GOOS != "windows" {
+		return "/bin/sh", []string{"-c", script}
+	}
+	return "powershell.exe", []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script}
+}
+
 func startShellPane(t *testing.T, script string) *Pane {
 	t.Helper()
-	pane, err := Start("/bin/sh", []string{"-c", script}, t.TempDir(), 40, 6)
+	path, args := shellCommand(script)
+	pane, err := Start(path, args, t.TempDir(), 40, 6)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -124,7 +137,7 @@ func TestPaneEnv(t *testing.T) {
 }
 
 func TestHasScreenText(t *testing.T) {
-	pane := startShellPane(t, "echo working on it")
+	pane := startShellPane(t, "echo 'working on it'")
 	waitExit(t, pane)
 	// The pane has exited, so HasScreenText must be false even though
 	// the text is on screen.
@@ -132,7 +145,7 @@ func TestHasScreenText(t *testing.T) {
 		t.Fatal("exited pane must not report screen text")
 	}
 
-	live := startShellPane(t, "echo busy marker; sleep 30")
+	live := startShellPane(t, "echo 'busy marker'; sleep 30")
 	deadline := time.Now().Add(5 * time.Second)
 	for !live.HasScreenText("busy marker") {
 		if time.Now().After(deadline) {
@@ -149,18 +162,26 @@ func TestHasScreenText(t *testing.T) {
 }
 
 func TestForegroundCommand(t *testing.T) {
-	pane := startShellPane(t, "sleep 30")
+	// PowerShell's "sleep" is an in-process alias for Start-Sleep (no
+	// child process), so Windows needs a script that spawns a real
+	// external process for the toolhelp32 walk to find.
+	script, match := "sleep 30", func(name string) bool { return name == "sleep" || name == "sh" }
+	if runtime.GOOS == "windows" {
+		script = "ping -n 31 127.0.0.1 > $null"
+		match = func(name string) bool { return name == "ping" } // exeBaseName lowercases PING.EXE
+	}
+	pane := startShellPane(t, script)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		pane.mu.Lock()
 		pane.fgCheckedAt = time.Time{} // bypass the cache while polling
 		pane.mu.Unlock()
 		name := pane.ForegroundCommand()
-		if name == "sleep" || name == "sh" {
+		if match(name) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("foreground = %q, want sleep or sh", name)
+			t.Fatalf("foreground = %q, no match", name)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -192,7 +213,11 @@ func TestSynchronizedOutputStillNotifiesOuterRenderer(t *testing.T) {
 }
 
 func TestBracketedPasteMode(t *testing.T) {
-	pane := startShellPane(t, "printf '\\033[?2004h'; sleep 5")
+	script := "printf '\\033[?2004h'; sleep 5"
+	if runtime.GOOS == "windows" {
+		script = `[Console]::Out.Write("$([char]27)[?2004h"); Start-Sleep -Seconds 5`
+	}
+	pane := startShellPane(t, script)
 	deadline := time.Now().Add(3 * time.Second)
 	for !pane.BracketedPaste() {
 		if time.Now().After(deadline) {

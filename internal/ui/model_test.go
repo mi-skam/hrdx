@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/patriceckhart/hrdx/internal/state"
+	"github.com/patriceckhart/hrdx/internal/term"
 )
 
 func newTestModel(paths ...string) Model {
@@ -323,6 +324,16 @@ func TestParseCSIU(t *testing.T) {
 	}
 }
 
+func TestShellArgsForPlatform(t *testing.T) {
+	if args := shellArgsFor("windows"); len(args) != 0 {
+		t.Fatalf("Windows shell args = %q, want none", args)
+	}
+	args := shellArgsFor("linux")
+	if len(args) != 1 || args[0] != "-l" {
+		t.Fatalf("Unix shell args = %q, want [-l]", args)
+	}
+}
+
 func TestCyclePaneUsesLayoutOrder(t *testing.T) {
 	model := newTestModel("/tmp/api")
 	currentSpace := model.spaces[0]
@@ -386,9 +397,10 @@ func TestResolveDirRejectsMissing(t *testing.T) {
 	if _, err := resolveDir("/definitely/not/here-12345"); err == nil {
 		t.Fatal("resolveDir accepted a missing directory")
 	}
-	path, err := resolveDir("/tmp")
+	dir := t.TempDir()
+	path, err := resolveDir(dir)
 	if err != nil || path == "" {
-		t.Fatalf("resolveDir(/tmp) = %q/%v", path, err)
+		t.Fatalf("resolveDir(%s) = %q/%v", dir, path, err)
 	}
 }
 
@@ -459,6 +471,24 @@ func TestPaneMenuHidesCloseForOnlyPaneInTab(t *testing.T) {
 	model.addPane(currentSpace, "shell", true)
 	if items := model.menuItems(); items[len(items)-1].action != "close" {
 		t.Fatal("close pane should be available when another pane is open in the same tab")
+	}
+}
+
+func TestExitedPaneAutoCloses(t *testing.T) {
+	model := newTestModel("/tmp/api")
+	currentSpace := model.spaces[0]
+	second := model.addPane(currentSpace, "shell", true)
+	if len(currentSpace.tab().panes) != 2 {
+		t.Fatal("setup: expected two panes")
+	}
+	exited := term.NewHolderPane(nil, 0, 80, 24)
+	exited.MarkExited() // Close is a no-op on an exited pane
+	second.term = exited
+
+	updated, _ := model.Update(paneUpdateMsg{id: second.id, open: false})
+	got := updated.(Model)
+	if n := len(got.spaces[0].tab().panes); n != 1 {
+		t.Fatalf("panes after exit = %d, want 1 (auto close)", n)
 	}
 }
 

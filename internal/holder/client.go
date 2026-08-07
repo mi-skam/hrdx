@@ -160,7 +160,10 @@ func (c *Client) readLoop() {
 			handler := c.onExited
 			c.mu.Unlock()
 			if evt.Event == "exited" && handler != nil {
-				handler(evt.Session)
+				// Never block the read loop on the handler: it may wait on
+				// the UI loop, which in turn may wait on a holder response
+				// only this loop can deliver (deadlock otherwise).
+				go handler(evt.Session)
 			}
 		}
 	}

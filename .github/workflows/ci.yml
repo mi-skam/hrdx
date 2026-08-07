@@ -19,8 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # hrdx drives PTYs, so only unix targets are supported.
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +33,7 @@ jobs:
         run: go vet ./...
 
       - name: gofmt check
+        shell: bash
         run: |
           diff=$(gofmt -l .)
           if [ -n "$diff" ]; then

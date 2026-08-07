@@ -5,15 +5,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/aymanbagabas/go-pty"
 	"github.com/patriceckhart/hrdx/internal/vt"
-	"golang.org/x/sys/unix"
 )
 
 // SessionHost is the holder-side transport of a pane: a background
@@ -31,16 +28,17 @@ type SessionHost interface {
 // is either owned locally (pty/cmd) or lives in the session holder
 // (host/session), in which case output arrives via Feed.
 type Pane struct {
-	mu        sync.Mutex
-	vt        vt.Terminal
-	pty       *os.File
-	cmd       *exec.Cmd
-	host      SessionHost
-	session   int64
-	updates   chan struct{}
-	exited    bool
-	kittyKeys bool
-	scanTail  []byte
+	mu           sync.Mutex
+	vt           vt.Terminal
+	pty          pty.Pty
+	ptyCloseOnce sync.Once
+	cmd          *pty.Cmd
+	host         SessionHost
+	session      int64
+	updates      chan struct{}
+	exited       bool
+	kittyKeys    bool
+	scanTail     []byte
 
 	// Foreground process cache for ForegroundCommand.
 	fgName      string
@@ -68,12 +66,21 @@ func Start(command string, args []string, cwd string, cols, rows int) (*Pane, er
 		rows = 24
 	}
 
-	cmd := exec.Command(command, args...)
+	ptmx, err := pty.New()
+	if err != nil {
+		return nil, fmt.Errorf("open pty: %w", err)
+	}
+	if err := ptmx.Resize(cols, rows); err != nil {
+		ptmx.Close()
+		return nil, fmt.Errorf("resize pty: %w", err)
+	}
+
+	cmd := ptmx.Command(resolveCommand(command), args...)
 	cmd.Dir = cwd
 	cmd.Env = PaneEnv()
 
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
-	if err != nil {
+	if err := cmd.Start(); err != nil {
+		ptmx.Close()
 		return nil, fmt.Errorf("start %s: %w", command, err)
 	}
 
@@ -141,6 +148,17 @@ func (p *Pane) MarkExited() {
 	close(p.updates)
 }
 
+// resolveCommand finds command on $PATH before handing it to go-pty. On
+// Windows, go-pty's Cmd.Start resolves a bare command name against the
+// child's working directory instead of $PATH when Dir is set, so agent
+// binaries elsewhere on PATH would otherwise fail to start.
+func resolveCommand(command string) string {
+	if resolved, err := exec.LookPath(command); err == nil {
+		return resolved
+	}
+	return command
+}
+
 // PaneEnv builds the environment for pane subprocesses. The outer
 // terminal's identity is scrubbed so children never detect capabilities
 // (like inline images) that hrdx's character-grid panes cannot deliver;
@@ -181,6 +199,20 @@ func PaneEnv() []string {
 func (p *Pane) Updates() <-chan struct{} { return p.updates }
 
 func (p *Pane) reader() {
+	// On Unix, the blocking Read below returns EOF on its own once the
+	// child exits and the kernel drains the pty's buffer. ConPTY on
+	// Windows has no such guarantee: the output pipe can stay open past
+	// process exit, so Read would block forever. Waiting for the process
+	// and then closing the pty unblocks Read there too; the brief delay
+	// gives the last bit of ConPTY output a chance to arrive first. On
+	// Unix this races harmlessly behind the natural EOF, which always
+	// wins first in practice.
+	go func() {
+		_ = p.cmd.Wait()
+		time.Sleep(150 * time.Millisecond)
+		p.closePty()
+	}()
+
 	buffer := make([]byte, 32*1024)
 	for {
 		n, err := p.pty.Read(buffer)
@@ -195,7 +227,6 @@ func (p *Pane) reader() {
 			break
 		}
 	}
-	_ = p.cmd.Wait()
 	p.MarkExited()
 }
 
@@ -258,41 +289,26 @@ func (p *Pane) ForegroundCommand() string {
 	}
 	p.fgCheckedAt = time.Now()
 	host, session := p.host, p.session
-	var fd int
-	if host == nil {
-		fd = int(p.pty.Fd())
+	local := p.pty
+	var rootPID int
+	if host == nil && p.cmd.Process != nil {
+		rootPID = p.cmd.Process.Pid
 	}
 	p.mu.Unlock()
 
-	// The PTY master reports the foreground process group of its slave
-	// side; the group leader is the running command. Holder panes ask
-	// the holder, which does the same ioctl on its side.
+	// Holder panes ask the holder, which resolves the foreground process
+	// on its side; local panes resolve it against their own PTY.
 	name := ""
 	if host != nil {
 		name = host.Foreground(session)
-	} else if pgid, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP); err == nil && pgid > 0 {
-		name = processName(pgid)
+	} else if local != nil {
+		name = foregroundName(local, rootPID)
 	}
 
 	p.mu.Lock()
 	p.fgName = name
 	p.mu.Unlock()
 	return name
-}
-
-// processName resolves a pid to its command name. Linux reads /proc, other
-// unixes shell out to ps; both paths return the bare name without path.
-func processName(pid int) string {
-	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
-		return strings.TrimSpace(string(data))
-	}
-	output, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		return ""
-	}
-	name := strings.TrimSpace(string(output))
-	// Login shells report as "-zsh"; strip the marker before basing.
-	return strings.TrimPrefix(filepath.Base(name), "-")
 }
 
 // KittyKeys reports whether the child requested enhanced (CSI-u) keyboard
@@ -431,7 +447,7 @@ func (p *Pane) Resize(cols, rows int) {
 		p.host.Resize(p.session, cols, rows)
 		return
 	}
-	_ = pty.Setsize(p.pty, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	_ = p.pty.Resize(cols, rows)
 }
 
 // Running reports whether the subprocess is still alive.
@@ -652,6 +668,17 @@ func (p *Pane) orderedSelection() (startL, startX, endL, endX int) {
 	return startL, startX, endL, endX
 }
 
+// closePty closes the local PTY exactly once. The exit-detection goroutine
+// in reader and an explicit Close can both race to close it (Windows'
+// ConPTY especially: closing an already-closed handle while a read is in
+// flight can crash rather than error out cleanly), so every close goes
+// through this guard.
+func (p *Pane) closePty() {
+	p.ptyCloseOnce.Do(func() {
+		_ = p.pty.Close()
+	})
+}
+
 // Close terminates the subprocess and releases the PTY. For holder
 // panes the session is killed in the holder.
 func (p *Pane) Close() {
@@ -667,7 +694,7 @@ func (p *Pane) Close() {
 	if p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
 	}
-	_ = p.pty.Close()
+	p.closePty()
 }
 
 // Detach releases the pane's local resources without touching the

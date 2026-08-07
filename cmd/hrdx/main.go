@@ -4,7 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 
@@ -37,6 +39,36 @@ func resolvedVersion() string {
 		return version
 	}
 	return strings.TrimPrefix(info.Main.Version, "v")
+}
+
+// defaultShell picks the shell for shell panes when --shell is unset.
+func defaultShell() string {
+	return defaultShellFor(runtime.GOOS, os.Getenv, exec.LookPath)
+}
+
+// defaultShellFor takes its platform dependencies as arguments so the Windows
+// selection rules can be tested on every host.
+func defaultShellFor(goos string, getenv func(string) string, lookPath func(string) (string, error)) string {
+	shell := getenv("SHELL")
+	if goos != "windows" {
+		if shell != "" {
+			return shell
+		}
+		return "/bin/sh"
+	}
+
+	// Git Bash exports SHELL=/usr/bin/bash, but that MSYS path cannot be
+	// launched by a native Windows hrdx process. Keep SHELL when Windows can
+	// actually resolve it (including an absolute Git for Windows path).
+	if shell != "" {
+		if _, err := lookPath(shell); err == nil {
+			return shell
+		}
+	}
+	if comspec := getenv("COMSPEC"); comspec != "" {
+		return comspec
+	}
+	return "powershell.exe"
 }
 
 func fullVersion() string {
@@ -118,7 +150,7 @@ func main() {
 	flag.StringVar(&piBin, "pi-bin", "", "path to the pi binary")
 	flag.StringVar(&claudeBin, "claude-bin", "", "path to the claude binary")
 	flag.StringVar(&codexBin, "codex-bin", "", "path to the codex binary")
-	flag.StringVar(&shell, "shell", os.Getenv("SHELL"), "shell for shell panes")
+	flag.StringVar(&shell, "shell", defaultShell(), "shell for shell panes")
 	flag.StringVar(&statePath, "state", state.DefaultPath(), "state file for workspace persistence (empty disables)")
 	flag.BoolVar(&resume, "continue", false, "resume each agent's latest session")
 	flag.BoolVar(&fresh, "fresh", false, "ignore saved workspaces and start clean")

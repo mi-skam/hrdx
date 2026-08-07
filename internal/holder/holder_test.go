@@ -4,11 +4,55 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// testShell returns a shell and args that run script as one inline
+// command: /bin/sh on unix, PowerShell on Windows. Scripts using only
+// "sleep N" and "exit N" run verbatim on both (PowerShell ships a "sleep"
+// alias for Start-Sleep and a C-like exit statement); anything else needs
+// a matching windowsScript.
+func testShell(script string) (string, []string) {
+	if runtime.GOOS != "windows" {
+		return "/bin/sh", []string{"-c", script}
+	}
+	return "powershell.exe", []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script}
+}
+
+// killSessionAndWait kills session and waits for the holder to confirm it
+// is gone. Windows locks a running process's working directory, so any
+// test that leaves a session running past its own return must kill it
+// (and wait for the OS to actually release the handle) before t.TempDir's
+// cleanup tries to remove that directory.
+func killSessionAndWait(t *testing.T, client *Client, session int64) {
+	t.Helper()
+	client.Kill(session)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sessions, _ := client.List()
+		if len(sessions) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session not removed: %+v", sessions)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// testEnv returns the env passed to test sessions. The unix PATH override
+// is meaningless on Windows, where PowerShell needs its normal host
+// environment (SystemRoot etc.) to start at all.
+func testEnv() []string {
+	if runtime.GOOS != "windows" {
+		return []string{"PATH=/bin:/usr/bin"}
+	}
+	return nil
+}
 
 func TestRing(t *testing.T) {
 	r := newRing(8)
@@ -128,7 +172,12 @@ func TestHolderSessionSurvivesDetach(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := first.Start("/bin/sh", []string{"-c", "echo ready; cat"}, t.TempDir(), []string{"PATH=/bin:/usr/bin"}, 80, 24)
+	script := "echo ready; cat"
+	if runtime.GOOS == "windows" {
+		script = "Write-Output 'ready'; while ($true) { $l = [Console]::In.ReadLine(); if ($null -eq $l) { break }; Write-Output $l }"
+	}
+	path, args := testShell(script)
+	session, err := first.Start(path, args, t.TempDir(), testEnv(), 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +211,8 @@ func TestHolderSessionSurvivesDetach(t *testing.T) {
 	}
 	second.Write(session, []byte("echoed-back\n"))
 	waitContains(t, &out2, "echoed-back")
+
+	killSessionAndWait(t, second, session)
 }
 
 func TestHolderReplaysDetachedOutput(t *testing.T) {
@@ -172,7 +223,12 @@ func TestHolderReplaysDetachedOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The marker prints shortly after attach; we detach before it fires.
-	session, err := first.Start("/bin/sh", []string{"-c", "sleep 0.3; echo late-marker; sleep 30"}, t.TempDir(), []string{"PATH=/bin:/usr/bin"}, 80, 24)
+	lateScript := "sleep 0.3; echo late-marker; sleep 30"
+	if runtime.GOOS == "windows" {
+		lateScript = "Start-Sleep -Milliseconds 300; Write-Output 'late-marker'; Start-Sleep -Seconds 30"
+	}
+	latePath, lateArgs := testShell(lateScript)
+	session, err := first.Start(latePath, lateArgs, t.TempDir(), testEnv(), 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +245,8 @@ func TestHolderReplaysDetachedOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitContains(t, &out, "late-marker")
+
+	killSessionAndWait(t, second, session)
 }
 
 func TestHolderExitEvent(t *testing.T) {
@@ -202,7 +260,8 @@ func TestHolderExitEvent(t *testing.T) {
 	exited := make(chan int64, 1)
 	client.SetExitHandler(func(session int64) { exited <- session })
 
-	session, err := client.Start("/bin/sh", []string{"-c", "exit 0"}, t.TempDir(), []string{"PATH=/bin:/usr/bin"}, 80, 24)
+	exitPath, exitArgs := testShell("exit 0")
+	session, err := client.Start(exitPath, exitArgs, t.TempDir(), testEnv(), 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +299,8 @@ func TestHolderKill(t *testing.T) {
 	}
 	defer client.Close()
 
-	session, err := client.Start("/bin/sh", []string{"-c", "sleep 30"}, t.TempDir(), []string{"PATH=/bin:/usr/bin"}, 80, 24)
+	sleepPath, sleepArgs := testShell("sleep 30")
+	session, err := client.Start(sleepPath, sleepArgs, t.TempDir(), testEnv(), 80, 24)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,5 +315,47 @@ func TestHolderKill(t *testing.T) {
 			t.Fatalf("session not removed: %+v", sessions)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The exit handler may block on the UI loop, which itself may be waiting
+// for a holder response. The read loop must keep delivering responses
+// while a handler is stuck, or the whole TUI deadlocks (close pane bug).
+func TestExitHandlerDoesNotBlockResponses(t *testing.T) {
+	socket := startTestHolder(t)
+	client, err := Connect(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	release := make(chan struct{})
+	client.SetExitHandler(func(session int64) { <-release })
+	defer close(release)
+
+	sleepPath, sleepArgs := testShell("sleep 30")
+	session, err := client.Start(sleepPath, sleepArgs, t.TempDir(), testEnv(), 80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out collector
+	if _, err := client.Attach(session, 80, 24, out.sink); err != nil {
+		t.Fatal(err)
+	}
+	client.Kill(session)
+	time.Sleep(300 * time.Millisecond) // exit event arrives, handler blocks
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.List()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("List during blocked exit handler: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("holder call deadlocked while the exit handler was blocked")
 	}
 }

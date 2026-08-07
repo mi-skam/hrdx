@@ -1,0 +1,10 @@
+# Normalize line endings on checkout regardless of the cloning machine's
+# core.autocrlf: without this, a Windows checkout (autocrlf=true is the
+# common default there) materializes CRLF for every text file, and
+# `gofmt -l` then flags the entire tree as unformatted even though the
+# committed content is untouched.
+* text=auto eol=lf
+
+*.png binary
+*.wav binary
+*.ico binary

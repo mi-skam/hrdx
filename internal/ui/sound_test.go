@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,8 +24,11 @@ func TestLoadSoundsRegistersCustomKinds(t *testing.T) {
 	if err := os.WriteFile(wav, []byte("RIFF"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, soundsFile),
-		[]byte(`[{"name": "moo", "file": "`+wav+`"}]`), 0o644); err != nil {
+	fixture, err := json.Marshal([]map[string]string{{"name": "moo", "file": wav}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, soundsFile), fixture, 0o644); err != nil {
 		t.Fatal(err)
 	}
 

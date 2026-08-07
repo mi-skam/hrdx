@@ -3,8 +3,8 @@
 #
 # Triggered by pushing a tag like `v0.1.0`. The release workflow runs
 # `goreleaser release --clean`, which compiles every target, packs
-# them into `.tar.gz` archives, generates a checksum file, and uploads
-# everything to a GitHub Release.
+# them into `.tar.gz` archives (`.zip` on Windows), generates a checksum
+# file, and uploads everything to a GitHub Release.
 
 version: 2
 
@@ -20,8 +20,7 @@ builds:
     binary: hrdx
     env:
       - CGO_ENABLED=0
-    # hrdx drives PTYs, so only unix targets are supported.
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     flags:
       - -trimpath
@@ -33,8 +32,13 @@ builds:
 
 archives:
   - id: hrdx
-    # Human-friendly name: hrdx_0.1.0_darwin_arm64.tar.gz
+    # Human-friendly name: hrdx_0.1.0_darwin_arm64.tar.gz,
+    # hrdx_0.1.0_windows_amd64.zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     files:
       - README.md
 
@@ -77,10 +81,16 @@ release:
   header: |
     ## hrdx {{ .Tag }}
 
-    one-liner install:
+    one-liner install (macOS/Linux):
 
     ```bash
     curl -fsSL https://www.hrdx.dev/install.sh | bash
     ```
 
-    or download a binary below, `chmod +x`, and drop it on your `$PATH`.
+    one-liner install (Windows):
+
+    ```powershell
+    irm https://www.hrdx.dev/install.ps1 | iex
+    ```
+
+    or download a binary below and drop it on your `PATH` (macOS/Linux: `chmod +x` first).
