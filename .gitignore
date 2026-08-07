@@ -1,3 +1,4 @@
 /hrdx
 bin/
 .DS_Store
+.worktrees/
