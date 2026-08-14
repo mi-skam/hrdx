@@ -17,7 +17,7 @@
 hrdx is a experimental, minimal and lightweight terminal multiplexer built for the agent era: your projects as workspaces in a sidebar, tabs per workspace, and real terminal panes running [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), [Claude Code](https://code.claude.com/docs/en/quickstart), [pi](https://www.pi.dev), [zot](https://www.zot.sh) or plain shells side by side. Kick off an agent in one project, switch to the next, and let the sidebar spinners tell you who is still working.
 
 - **Real terminals, not wrappers.** Every pane is a genuine PTY session with a full terminal emulator behind it. Agent TUIs run exactly as they do standalone: streaming, slash commands, sessions, mouse support, all of it. Panes present a clean terminal identity so capability-sniffing TUIs pick rendering paths that work inside a multiplexer, and `HRDX=1` lets tools detect they run inside hrdx.
-- **Everything in view.** The sidebar shows every workspace with its git branch and ahead/behind counts, every pane with a live status dot, and an agents list that jumps you straight to any running agent, including ones you started by hand inside a shell.
+- **Everything in view.** The sidebar shows one hierarchy of workspaces, Git branches, and panes, adding tab rows only when a workspace has multiple tabs. Shell circles and agent diamonds expose pane type and state at a glance; an agent's icon becomes an animated braille spinner while it works.
 - **Feels like your terminal.** Scrollback, mouse selection with clipboard copy, drag-to-resize splits, drag-to-reorder workspaces, right-click context menus, and kitty keyboard protocol pass-through so even exotic chords like ctrl+1 reach your agent.
 - **Picks up where you left off.** Quit and relaunch: shells and agents keep running in a lightweight session holder and reattach exactly where they were, running commands and all. Workspaces, tabs, splits, and ratios come back too, and if a session is truly gone, agents resume their latest conversation from their own session store.
 - **Yours to tune.** A settings window (`ctrl+b ,` or the gear in the sidebar) lets you switch individual agents on or off, pick a notification sound for finished turns (including your own audio files), and change the color theme, with user themes as simple JSON files. All persisted. See [Themes](#themes).
@@ -116,7 +116,7 @@ Actions: `prefix`, `literal`, `quit`, `picker-right`, `picker-down`, `agent-righ
 
 ## Mouse
 
-Everything is clickable: tabs, workspaces, panes, agents, menus, and the settings entry at the bottom of the sidebar. Drag workspaces to reorder them, drag pane borders to resize, right-click for context menus, and drag with the left button to select text (copied straight to your clipboard). Wheel events go to the pane under the cursor: agent TUIs scroll themselves, shells scroll their local history, and `shift+pgup` / `shift+pgdn` do the same from the keyboard.
+Everything is clickable: workspace, tab, and pane rows in the sidebar, the main tab bar, menus, and the settings entry at the bottom. Drag workspaces to reorder them, drag pane borders to resize, right-click for context menus, and drag with the left button to select text (copied straight to your clipboard). Wheel events go to the pane under the cursor: agent TUIs scroll themselves, shells scroll their local history, and `shift+pgup` / `shift+pgdn` do the same from the keyboard.
 
 ## Remote and container panes
 
@@ -166,7 +166,7 @@ The session holder keeps the local SSH, Docker, or Kubernetes client process ali
 
 ## Custom harnesses
 
-Any agent CLI beyond the built-ins can be registered by dropping a `harness.json` next to the state file (`~/Library/Application Support/hrdx/` on macOS, `$XDG_CONFIG_HOME/hrdx/` on Linux, `%AppData%\hrdx\` on Windows). Registered harnesses appear everywhere the built-ins do: in the pickers, in agent cycling, in the sidebar agents list, and in the settings window for enabling and disabling.
+Any agent CLI beyond the built-ins can be registered by dropping a `harness.json` next to the state file (`~/Library/Application Support/hrdx/` on macOS, `$XDG_CONFIG_HOME/hrdx/` on Linux, `%AppData%\hrdx\` on Windows). Registered harnesses appear everywhere the built-ins do: in the pickers, in agent cycling, as agent panes in the sidebar hierarchy, and in the settings window for enabling and disabling.
 
 ```json
 [

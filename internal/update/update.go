@@ -8,10 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/mod/semver"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -109,40 +109,23 @@ func buildInfo(current, latest, url string) Info {
 	return info
 }
 
-// VersionLess returns a < b for dotted semver-ish tags like "0.0.4".
-// Non-numeric components compare as zero, which is fine for hrdx's
-// x.y.z-only scheme.
+// VersionLess reports whether a is an older semantic version than b.
+// Invalid versions fail closed so the updater never offers a downgrade.
 func VersionLess(a, b string) bool {
-	as := splitVersion(a)
-	bs := splitVersion(b)
-	for i := 0; i < 3; i++ {
-		av, bv := 0, 0
-		if i < len(as) {
-			av = as[i]
-		}
-		if i < len(bs) {
-			bv = bs[i]
-		}
-		if av != bv {
-			return av < bv
-		}
+	a = normalizedVersion(a)
+	b = normalizedVersion(b)
+	if !semver.IsValid(a) || !semver.IsValid(b) {
+		return false
 	}
-	return false
+	return semver.Compare(a, b) < 0
 }
 
-func splitVersion(s string) []int {
-	s = strings.TrimPrefix(s, "v")
-	// Strip build-metadata suffix like "(abc1234, 2026-04-18)".
-	if i := strings.IndexAny(s, " ("); i > 0 {
-		s = s[:i]
+func normalizedVersion(v string) string {
+	v = VersionOnly(v)
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
 	}
-	parts := strings.Split(s, ".")
-	out := make([]int, 0, len(parts))
-	for _, p := range parts {
-		n, _ := strconv.Atoi(p)
-		out = append(out, n)
-	}
-	return out
+	return v
 }
 
 // VersionOnly strips build metadata appended to the version string, so

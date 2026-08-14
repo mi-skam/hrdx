@@ -21,6 +21,10 @@ func TestVersionLess(t *testing.T) {
 		{"v0.0.1", "v0.0.2", true},
 		{"0.0.5 (abc1234, 2026-01-01)", "0.0.6", true},
 		{"1.0.0", "0.9.9", false},
+		{"0.0.21-0.20260809165004-9e3c28d4b65", "0.0.20", false},
+		{"0.0.21-0.20260809165004-9e3c28d4b65", "0.0.21", true},
+		{"0.0.20", "0.0.21-0.20260809165004-9e3c28d4b65", true},
+		{"not-a-version", "0.0.20", false},
 	}
 	for _, c := range cases {
 		if got := VersionLess(c.a, c.b); got != c.want {

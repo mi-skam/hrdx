@@ -9,9 +9,9 @@ import (
 )
 
 // Custom harnesses extend the built-in agent list with user-defined coding
-// agent CLIs. They are declared in harness.json next to the state file
-// and behave like built-ins everywhere: pickers, cycling, the sidebar
-// agents section, settings toggles, resume-on-restore, and busy tracking.
+// agent CLIs. They are declared in harness.json next to the state file and
+// behave like built-ins everywhere: pickers, cycling, sidebar pane identity,
+// settings toggles, resume-on-restore, and busy tracking.
 
 const harnessFile = "harness.json"
 

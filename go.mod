@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/term v0.2.1
 	github.com/mattn/go-runewidth v0.0.16
+	golang.org/x/mod v0.35.0
 	golang.org/x/sys v0.44.0
 )
 

@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/patriceckhart/hrdx/internal/holder"
 	"github.com/patriceckhart/hrdx/internal/state"
 	"github.com/patriceckhart/hrdx/internal/term"
 )
@@ -90,55 +91,109 @@ func TestTabHit(t *testing.T) {
 	}
 }
 
-func TestSidebarHitMapsRows(t *testing.T) {
+func TestSidebarHitMapsHierarchyRows(t *testing.T) {
 	model := newTestModel("/tmp/api", "/tmp/web")
 
-	// Row layout without git branches (temp dirs are not repos):
-	// 0 blank, 1 WORKSPACES, 2 space api, 3 pane api/zot, 4 space web,
-	// 5 pane web/zot, 6 blank, 7 new workspace, 8 blank, 9 AGENTS, 10+.
-	kind, index, _ := model.sidebarHit(2)
-	if kind != "space" || index != 0 {
-		t.Fatalf("row 2 = %q/%d, want space/0", kind, index)
+	// Singleton tabs are elided: 0 top spacer, 1 WORKSPACES, 2 section gap,
+	// 3 space api, 4 pane api/zot, 5 divider, 6 space web, 7 pane web/zot,
+	// 8 blank, 9 new.
+	if gap := model.sidebarHit(2); gap.kind != "" || gap.label != "" {
+		t.Fatalf("row 2 = %+v, want blank section gap", gap)
 	}
-	kind, index, sub := model.sidebarHit(3)
-	if kind != "pane" || index != 0 || sub != 0 {
-		t.Fatalf("row 3 = %q/%d/%d, want pane/0/0", kind, index, sub)
+	hit := model.sidebarHit(3)
+	if hit.kind != "space" || hit.space != 0 {
+		t.Fatalf("row 3 = %+v, want space 0", hit)
 	}
-	kind, _, _ = model.sidebarHit(7)
-	if kind != "new" {
-		t.Fatalf("row 7 = %q, want new", kind)
+	hit = model.sidebarHit(4)
+	if hit.kind != "pane" || hit.space != 0 || hit.tab != 0 || hit.pane != 0 {
+		t.Fatalf("row 4 = %+v, want space 0 tab 0 pane 0", hit)
+	}
+	if hit = model.sidebarHit(5); hit.kind != "divider" || !strings.HasPrefix(hit.label, " ") || strings.HasPrefix(hit.label, "  ") || lipgloss.Width(hit.label) != sidebarWidth-1 || strings.Contains(hit.label, "└") {
+		t.Fatalf("row 5 = %+v, want a divider aligned with workspace text and one cell from the right border", hit)
+	}
+	if hit = model.sidebarHit(9); hit.kind != "new" {
+		t.Fatalf("row 9 = %+v, want new workspace", hit)
+	}
+
+	panes, tabs := 0, 0
+	workspacesLabel := false
+	for _, row := range model.sidebarRows() {
+		if strings.Contains(row.label, "AGENTS") {
+			t.Fatalf("unified sidebar contains an AGENTS section label: %q", row.label)
+		}
+		if strings.Contains(row.label, "WORKSPACES") {
+			workspacesLabel = true
+		}
+		switch row.kind {
+		case "pane":
+			panes++
+		case "tab":
+			tabs++
+		}
+	}
+	if !workspacesLabel {
+		t.Fatal("unified sidebar lacks the WORKSPACES section label")
+	}
+	if panes != 2 || tabs != 0 {
+		t.Fatalf("pane/tab rows = %d/%d, want 2/0 for singleton tabs", panes, tabs)
 	}
 }
 
-func TestBranchAlignsWithWorkspaceName(t *testing.T) {
-	model := newTestModel("/tmp/api")
+func TestBranchStaysWithWorkspaceName(t *testing.T) {
+	model := newTestModel("/tmp/api", "/tmp/web")
+	model.selected = 1
 	model.branches["/tmp/api"] = branchInfo{value: "main", checked: time.Now()}
 	rows := model.sidebarRows()
-	branchRow := rows[3]
-	if leading := len(branchRow.label) - len(strings.TrimLeft(branchRow.label, " ")); leading != 2 {
-		t.Fatalf("branch indentation = %d, want 2 to align with workspace name", leading)
+	workspaceRow, branchRow := rows[3], rows[4]
+	if workspaceRow.kind != "space" || branchRow.kind != "space" || !strings.Contains(branchRow.label, "main") {
+		t.Fatalf("branch must immediately follow its workspace: %+v, %+v", workspaceRow, branchRow)
+	}
+	if leading := len(branchRow.label) - len(strings.TrimLeft(branchRow.label, " ")); leading != 1 {
+		t.Fatalf("branch indentation = %d, want 1 to align with workspace name", leading)
 	}
 }
 
-func TestWorkspacePaneRowsUseStaticStateIcons(t *testing.T) {
+func TestSelectedWorkspaceRailSpansHierarchy(t *testing.T) {
+	model := newTestModel("/tmp/api")
+	model.selected = 0
+	model.branches["/tmp/api"] = branchInfo{value: "main", checked: time.Now()}
+	model.addTab(model.spaces[0], "shell")
+
+	rail := styleSpaceSel.Render("▍")
+	rows := model.sidebarRows()
+	for index := 3; index <= 8; index++ {
+		if !strings.HasPrefix(rows[index].label, rail) {
+			t.Fatalf("row %d does not continue selected workspace rail: %q", index, rows[index].label)
+		}
+	}
+}
+
+func TestSidebarPaneRowsUseSharedShellAndAgentSymbols(t *testing.T) {
 	model := newTestModel("/tmp/api")
 	rows := model.sidebarRows()
-	workspacePane := rows[3]
-	if !strings.Contains(workspacePane.label, "○") {
-		t.Fatalf("workspace pane row has no state bullet: %q", workspacePane.label)
+	workspacePane := rows[4]
+	if !strings.Contains(workspacePane.label, "○") || !strings.Contains(workspacePane.label, "starting") {
+		t.Fatalf("starting agent row lacks shared pane symbol or state: %q", workspacePane.label)
 	}
 	for _, frame := range spinnerFrames {
 		if strings.Contains(workspacePane.label, frame) {
-			t.Fatalf("workspace pane row contains an animated spinner: %q", workspacePane.label)
+			t.Fatalf("idle agent row contains an animated spinner: %q", workspacePane.label)
 		}
 	}
 
-	target := &pane{running: true}
-	if got, want := paneStateIcon(target, true, false, 0), styleDotBusy.Render("●"); got != want {
-		t.Fatalf("busy workspace icon = %q, want static busy bullet %q", got, want)
+	shell := &pane{kind: "shell", running: true}
+	if got, want := paneTypeStateIcon(shell, false, false, 0), paneIconCell(styleDotOn, "●"); got != want {
+		t.Fatalf("running shell icon = %q, want %q", got, want)
 	}
-	if got, want := paneStateIcon(target, true, true, 0), styleDotBusy.Render(spinnerFrames[0]); got != want {
+	agent := &pane{kind: "zot", running: true}
+	if got, want := paneTypeStateIcon(agent, true, false, 0), paneIconCell(styleDotOn, "●"); got != want {
+		t.Fatalf("idle agent icon = %q, want shared shell icon %q", got, want)
+	}
+	if got, want := paneTypeStateIcon(agent, true, true, 0), paneIconCell(styleDotBusy, spinnerFrames[0]); got != want {
 		t.Fatalf("busy agent icon = %q, want animated spinner %q", got, want)
+	}
+	if width := lipgloss.Width(paneTypeStateIcon(agent, true, false, 0)); width != 2 {
+		t.Fatalf("agent icon width = %d, want fixed two-cell column", width)
 	}
 }
 
@@ -201,11 +256,39 @@ func TestSidebarScrollClamps(t *testing.T) {
 
 func TestMouseSelectsSpace(t *testing.T) {
 	model := newTestModel("/tmp/api", "/tmp/web")
-	// Sidebar row 4 (space web) is at screen Y=5.
-	updated, _ := model.updateMouse(tea.MouseMsg{X: 3, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	// Sidebar row 6 (space web) is screen Y=7.
+	updated, _ := model.updateMouse(tea.MouseMsg{X: 3, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	got := updated.(Model)
 	if got.selected != 1 {
 		t.Fatalf("selected = %d, want 1", got.selected)
+	}
+}
+
+func TestMouseSelectsSidebarTabAndPane(t *testing.T) {
+	model := newTestModel("/tmp/api")
+	currentSpace := model.spaces[0]
+	model.addTab(currentSpace, "shell")
+	currentSpace.active = 0
+
+	activeTab := model.sidebarRows()[4].label
+	if !strings.Contains(activeTab, styleSpaceSel.Render("▸")) || !strings.Contains(activeTab, styleSpaceSel.Render("1")) {
+		t.Fatalf("active tab marker and number should share the selected style: %q", activeTab)
+	}
+
+	// Sidebar rows: 3 workspace, 4 tab 1, 5 pane, 6 tab 2, 7 pane.
+	// Screen Y is sidebar row + 1.
+	updated, _ := model.updateMouse(tea.MouseMsg{X: 5, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	got := updated.(Model)
+	if got.spaces[0].active != 1 {
+		t.Fatalf("active tab = %d, want 1 after clicking tab row", got.spaces[0].active)
+	}
+
+	got.spaces[0].active = 0
+	updated, _ = got.updateMouse(tea.MouseMsg{X: 7, Y: 8, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	got = updated.(Model)
+	if got.spaces[0].active != 1 || got.spaces[0].tabs[1].selected != 0 {
+		t.Fatalf("active tab/pane = %d/%d, want 1/0 after clicking pane row",
+			got.spaces[0].active, got.spaces[0].tabs[1].selected)
 	}
 }
 
@@ -243,16 +326,16 @@ func TestSidebarDragReordersSpaces(t *testing.T) {
 	model := newTestModel("/tmp/api", "/tmp/web")
 	api, web := model.spaces[0], model.spaces[1]
 
-	// Rows: 0 blank, 1 WORKSPACES, 2 space api, 3 pane, 4 space web,
-	// 5 pane. Screen Y is row + 1. Press on api's name arms the drag.
-	updated, _ := model.updateMouse(tea.MouseMsg{X: 3, Y: 3, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	// Rows: 0 spacer, 1 WORKSPACES, 2 section gap, 3 space api, 4 pane,
+	// 5 divider, 6 space web, 7 pane. Screen Y is row + 1.
+	updated, _ := model.updateMouse(tea.MouseMsg{X: 3, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	got := updated.(Model)
 	if got.dragSpace != api {
 		t.Fatal("press on a workspace row should arm the drag")
 	}
 
-	// Drag down onto web's rows: api moves below web.
-	updated, _ = got.updateMouse(tea.MouseMsg{X: 3, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	// Drag down onto web's pane row: api moves below web.
+	updated, _ = got.updateMouse(tea.MouseMsg{X: 3, Y: 8, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
 	got = updated.(Model)
 	if got.spaces[0] != web || got.spaces[1] != api {
 		t.Fatalf("order after drag = %s/%s, want web/api", got.spaces[0].name, got.spaces[1].name)
@@ -261,7 +344,7 @@ func TestSidebarDragReordersSpaces(t *testing.T) {
 		t.Fatalf("selected = %d, want 1 (follows the dragged space)", got.selected)
 	}
 
-	updated, _ = got.updateMouse(tea.MouseMsg{X: 3, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
+	updated, _ = got.updateMouse(tea.MouseMsg{X: 3, Y: 8, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
 	got = updated.(Model)
 	if got.dragSpace != nil || got.dragMoved {
 		t.Fatal("release should clear the drag state")
@@ -272,9 +355,9 @@ func TestSidebarClickWithoutMotionKeepsOrder(t *testing.T) {
 	model := newTestModel("/tmp/api", "/tmp/web")
 	api := model.spaces[0]
 
-	updated, _ := model.updateMouse(tea.MouseMsg{X: 3, Y: 3, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, _ := model.updateMouse(tea.MouseMsg{X: 3, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	got := updated.(Model)
-	updated, _ = got.updateMouse(tea.MouseMsg{X: 3, Y: 3, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
+	updated, _ = got.updateMouse(tea.MouseMsg{X: 3, Y: 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease})
 	got = updated.(Model)
 	if got.spaces[0] != api {
 		t.Fatal("a plain click must not reorder workspaces")
@@ -401,6 +484,23 @@ func TestResolveDirRejectsMissing(t *testing.T) {
 	path, err := resolveDir(dir)
 	if err != nil || path == "" {
 		t.Fatalf("resolveDir(%s) = %q/%v", dir, path, err)
+	}
+}
+
+func TestHolderSessionMatchesWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	sessions := []holder.SessionInfo{
+		{ID: 7, CWD: workspace},
+		{ID: 8, CWD: t.TempDir()},
+	}
+	if !holderSessionMatchesWorkspace(sessions, 7, workspace) {
+		t.Fatal("matching holder session was rejected")
+	}
+	if holderSessionMatchesWorkspace(sessions, 8, workspace) {
+		t.Fatal("session from another workspace was accepted")
+	}
+	if holderSessionMatchesWorkspace(sessions, 9, workspace) {
+		t.Fatal("missing holder session was accepted")
 	}
 }
 

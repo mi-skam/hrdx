@@ -40,10 +40,12 @@ var (
 	styleSpaceSel  lipgloss.Style
 	styleSpaceDim  lipgloss.Style
 	stylePaneSel   lipgloss.Style
+	stylePaneRun   lipgloss.Style
 	stylePaneDim   lipgloss.Style
 	styleDotOn     lipgloss.Style
 	styleDotBusy   lipgloss.Style
 	styleDotOff    lipgloss.Style
+	styleDivider   lipgloss.Style
 	styleNewButton lipgloss.Style
 	styleMuted     lipgloss.Style
 	styleError     lipgloss.Style
@@ -66,12 +68,14 @@ func rebuildStyles() {
 
 	styleSection = lipgloss.NewStyle().Foreground(colorMuted).Bold(true)
 	styleSpaceSel = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	styleSpaceDim = lipgloss.NewStyle().Foreground(colorBarFg)
+	styleSpaceDim = lipgloss.NewStyle().Foreground(colorBarFg).Bold(true)
 	stylePaneSel = lipgloss.NewStyle().Foreground(colorAccent)
+	stylePaneRun = lipgloss.NewStyle().Foreground(colorBarFg)
 	stylePaneDim = lipgloss.NewStyle().Foreground(colorMuted)
 	styleDotOn = lipgloss.NewStyle().Foreground(colorGood)
 	styleDotBusy = lipgloss.NewStyle().Foreground(colorBusy)
 	styleDotOff = lipgloss.NewStyle().Foreground(colorBad)
+	styleDivider = lipgloss.NewStyle().Foreground(colorFaint)
 	styleNewButton = lipgloss.NewStyle().Foreground(colorAccent)
 	styleMuted = lipgloss.NewStyle().Foreground(colorMuted)
 	styleError = lipgloss.NewStyle().Foreground(colorBad)
